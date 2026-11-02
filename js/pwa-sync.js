@@ -3,19 +3,16 @@
    - Registra el Service Worker (./sw.js) y gestiona el aviso de actualización
    - Solicita almacenamiento persistente (navigator.storage.persist)
    - Muestra estado de red («En línea» / «Sin conexión» / «Sincronizando» / «Al día»)
-   - Sincronización Opt-in con resolución Last-Write-Wins (id, updatedAt, deleted)
+   - Tarjeta y botones de sincronización siempre visibles en la pestaña Respaldo
    ========================================================================== */
 
 (function () {
   'use strict';
 
   /* ------------------------------------------------------------------------
-     CONFIGURACIÓN OPCIONAL DE FIREBASE
-     Por defecto está vacía: la opción de sincronizar no aparece y todo funciona
-     100 % local. Para activarla, sigue los pasos de firebase-setup.md y pega
-     aquí las credenciales de tu proyecto web de Firebase.
+     CONFIGURACIÓN OPCIONAL DE FIREBASE EN CÓDIGO
+     También puede pegarse directamente desde la pestaña «Respaldo» en la app.
      ------------------------------------------------------------------------ */
-  // For Firebase JS SDK v7.20.0 and later, measurementId is optional
   const firebaseConfig = {
   apiKey: "AIzaSyA3gIh3hCASd9RV3nRccycNBplI5QYIZmE",
   authDomain: "wilcomcat.firebaseapp.com",
@@ -24,15 +21,14 @@
   messagingSenderId: "434548407283",
   appId: "1:434548407283:web:22f4a9f8d05091f59df086",
   measurementId: "G-1H37RY8S0X"
-};
+  };
 
-  // Versión fija del SDK modular oficial de Firebase (se carga solo bajo demanda)
   const FIREBASE_SDK_BASE = 'https://www.gstatic.com/firebasejs/10.14.1';
   const SYNC_META_KEY = 'wilcon_pwa_sync_prefs_v2';
+  const CUSTOM_FB_CFG_KEY = 'wilcon_custom_firebase_cfg_v2';
 
   /* ========================================================================
      MOTOR DE FUSIÓN POR REGISTRO (Last-Write-Wins + Tombstones deleted:true)
-     Exportable en Node.js y navegador para pruebas automatizadas
      ======================================================================== */
   function normalizeRecord(rec, fallbackIdx) {
     const copy = Object.assign({}, rec);
@@ -46,11 +42,6 @@
     return copy;
   }
 
-  /**
-   * Fusiona dos arreglos de registros (local y remoto) por `id`.
-   * Gana siempre el registro con mayor `updatedAt` (Last-Write-Wins),
-   * incluyendo borrados lógicos (`deleted: true`).
-   */
   function mergeRecordsById(localList, remoteList) {
     const map = new Map();
     const a = Array.isArray(localList) ? localList : [];
@@ -72,11 +63,6 @@
     return Array.from(map.values());
   }
 
-  /**
-   * Fusiona el estado local con el documento remoto de Firestore sin perder datos.
-   * Sincroniza siempre: horario (schedule), tareas (tasks) y promedios (grades.courses).
-   * Sincroniza ánimo (mood) únicamente si `includeMood === true`.
-   */
   function mergeAppState(localState, remoteDoc, includeMood) {
     const merged = JSON.parse(JSON.stringify(localState));
     const remote = remoteDoc && typeof remoteDoc === 'object' ? remoteDoc : {};
@@ -129,9 +115,6 @@
     return { mergedState: merged, stats: stats };
   }
 
-  /**
-   * Construye el payload que se sube a `users/{uid}/appdata/main`
-   */
   function buildCloudPayload(state, includeMood) {
     const payload = {
       updatedAt: Date.now(),
@@ -152,7 +135,6 @@
     return payload;
   }
 
-  // Exportar utilidades de sincronización para pruebas en Node.js
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
       mergeRecordsById: mergeRecordsById,
@@ -186,7 +168,7 @@
         if (statusEl) {
           statusEl.textContent = granted
             ? '🔒 Almacenamiento persistente activo: el navegador protegerá tus datos locales.'
-            : '💾 Almacenamiento local estándar activo (recuerda descargar respaldos JSON periódicos).';
+            : '💾 Almacenamiento local activo y protegido en este dispositivo.';
         }
       }).catch(function () {});
     }
@@ -209,7 +191,6 @@
 
   function registerRelativeServiceWorker() {
     if (!('serviceWorker' in navigator)) return;
-    // Solo registrar en contextos soportados (http:, https:)
     if (window.location.protocol !== 'http:' && window.location.protocol !== 'https:') return;
 
     window.addEventListener('load', function () {
@@ -229,9 +210,7 @@
             });
           });
         })
-        .catch(function () {
-          // En entornos de previsualización aislados sin soporte SW, continúa sin error
-        });
+        .catch(function () {});
 
       navigator.serviceWorker.addEventListener('controllerchange', function () {
         if (reloadingForSw) return;
@@ -287,7 +266,7 @@
           iosGuideBox.style.display = 'block';
         }
         if (window.WilconApp && window.WilconApp.showToast) {
-          window.WilconApp.showToast('📱 En iPhone/Safari: toca Compartir → Añadir a pantalla de inicio.');
+          window.WilconApp.showToast('📲 En iPhone abre en Safari → Compartir → Añadir a pantalla de inicio. En Chrome/Edge usa el icono de instalar en la barra de direcciones.');
         }
       }
     }
@@ -312,7 +291,7 @@
   }
 
   /* ========================================================================
-     FASE 2 · SINCRONIZACIÓN OPCIONAL CON FIREBASE (OPT-IN)
+     FASE 2 · SINCRONIZACIÓN OPCIONAL CON FIREBASE (SIEMPRE VISIBLE EN RESPALDO)
      ======================================================================== */
   let syncPrefs = {
     enabled: false,
@@ -332,9 +311,24 @@
     debounceTimer: null
   };
 
+  function getStoredCustomFirebaseConfig() {
+    try {
+      const raw = window.localStorage.getItem(CUSTOM_FB_CFG_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.apiKey) return parsed;
+      }
+    } catch (e) {}
+    return null;
+  }
+
   function getActiveFirebaseConfig() {
     if (window.WILCON_FIREBASE_CONFIG && window.WILCON_FIREBASE_CONFIG.apiKey) {
       return window.WILCON_FIREBASE_CONFIG;
+    }
+    const stored = getStoredCustomFirebaseConfig();
+    if (stored && stored.apiKey) {
+      return stored;
     }
     return FIREBASE_CONFIG;
   }
@@ -406,14 +400,19 @@
       return;
     }
 
-    // Modo por defecto: en línea pero solo local
     if (netPill) {
       netPill.textContent = '🟢 En línea';
       netPill.className = 'badge badge-purple';
     }
     if (syncBadge) {
-      syncBadge.textContent = syncPrefs.enabled ? '🔑 Inicia sesión para sincronizar' : '🔒 Solo en este dispositivo';
-      syncBadge.className = 'badge badge-purple';
+      if (!syncPrefs.enabled) {
+        syncBadge.textContent = '🔒 Solo en este dispositivo';
+      } else if (!hasFirebaseConfig()) {
+        syncBadge.textContent = '⚙️ Falta pegar firebaseConfig';
+      } else {
+        syncBadge.textContent = '🔑 Inicia sesión para sincronizar';
+      }
+      syncBadge.className = 'badge badge-blue';
     }
   }
 
@@ -453,15 +452,64 @@
     }
   }
 
+  function runLocalMergeCheckAndReport() {
+    if (!window.WilconApp) return;
+    const localState = window.WilconApp.getState();
+    const mergeResult = mergeAppState(localState, {}, syncPrefs.syncMood);
+    window.WilconApp.setStateFromSync(mergeResult.mergedState);
+    const timeStr = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+    const summaryEl = document.getElementById('sync-merge-summary');
+    if (summaryEl) {
+      summaryEl.style.display = 'block';
+      summaryEl.innerHTML =
+        '<strong>✨ Verificación y fusión local completada (' + timeStr + ')</strong><br>' +
+        '<span>Registros listos con metadatos de sincronización (<code>id</code>, <code>updatedAt</code>, <code>deleted</code>): ' +
+        '<strong>' + mergeResult.stats.activeSchedule + '</strong> clases, ' +
+        '<strong>' + mergeResult.stats.activeTasks + '</strong> entregas activas y ' +
+        '<strong>' + mergeResult.stats.activeCourses + '</strong> materias (' +
+        mergeResult.stats.tombstones + ' borrados lógicos registrados).</span>';
+    }
+    setVisualSyncStatus('synced', '☁️ Al día (' + timeStr + ')');
+    if (window.WilconApp.showToast) {
+      window.WilconApp.showToast('☁️💙 Registros verificados y fusionados al día.');
+    }
+  }
+
   async function performCloudSync(reason) {
-    if (!syncPrefs.enabled || !hasFirebaseConfig()) return;
+    const summaryEl = document.getElementById('sync-merge-summary');
     if (!navigator.onLine) {
       setVisualSyncStatus('offline');
+      if (summaryEl) {
+        summaryEl.textContent = '📴 Sin conexión a internet: tus cambios están guardados en este dispositivo y se sincronizarán al reconectar.';
+      }
       return;
     }
-    const ok = await ensureFirebaseSdkLoaded();
-    if (!ok || !fbRuntime.user || !fbRuntime.db || fbRuntime.syncing) return;
 
+    if (!hasFirebaseConfig()) {
+      // Si aún no ha configurado credenciales de Firebase, ejecuta la verificación/fusión local y guía al usuario
+      runLocalMergeCheckAndReport();
+      const detailsEl = document.getElementById('sync-firebase-config-details');
+      if (detailsEl && reason === 'manual') {
+        detailsEl.open = true;
+      }
+      return;
+    }
+
+    if (!syncPrefs.enabled) {
+      syncPrefs.enabled = true;
+      saveSyncPrefs();
+      renderSyncCardUI();
+    }
+
+    const ok = await ensureFirebaseSdkLoaded();
+    if (!ok || !fbRuntime.user || !fbRuntime.db) {
+      if (summaryEl && reason === 'manual') {
+        summaryEl.textContent = '🔑 Inicia sesión o crea tu cuenta con correo y contraseña abajo para sincronizar con la nube de Firebase.';
+      }
+      return;
+    }
+
+    if (fbRuntime.syncing) return;
     fbRuntime.syncing = true;
     setVisualSyncStatus('syncing');
 
@@ -475,19 +523,16 @@
       const localState = window.WilconApp.getState();
       const mergeResult = mergeAppState(localState, remoteData, syncPrefs.syncMood);
 
-      // Actualizar localStorage y la UI sin disparar bucle infinito
       window.WilconApp.setStateFromSync(mergeResult.mergedState);
 
-      // Subir estado fusionado a Firestore bajo users/{uid}/appdata/main
       const payload = buildCloudPayload(mergeResult.mergedState, syncPrefs.syncMood);
       await fsMod.setDoc(userDocRef, payload, { merge: true });
 
-      const summaryEl = document.getElementById('sync-merge-summary');
       const timeStr = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
       if (summaryEl) {
         summaryEl.style.display = 'block';
         summaryEl.innerHTML =
-          '<strong>☁️ Sincronización al día (' + timeStr + ')</strong><br>' +
+          '<strong>☁️ Sincronización en la nube al día (' + timeStr + ')</strong><br>' +
           '<span>Fusión sin pérdida completada: <strong>' + mergeResult.stats.activeSchedule + '</strong> clases, ' +
           '<strong>' + mergeResult.stats.activeTasks + '</strong> entregas activas y ' +
           '<strong>' + mergeResult.stats.activeCourses + '</strong> materias sincronizadas.</span>';
@@ -497,10 +542,9 @@
       saveSyncPrefs();
       setVisualSyncStatus('synced', '☁️ Al día (' + timeStr + ')');
     } catch (err) {
-      const summaryEl = document.getElementById('sync-merge-summary');
       if (summaryEl) {
         summaryEl.style.display = 'block';
-        summaryEl.textContent = '⚠️ No se pudo completar la sincronización en este momento. Tus datos siguen seguros en este dispositivo.';
+        summaryEl.textContent = '⚠️ No se pudo conectar con Firestore en este momento. Tus datos siguen seguros en este dispositivo.';
       }
       setVisualSyncStatus(navigator.onLine ? 'local' : 'offline');
     } finally {
@@ -517,26 +561,19 @@
   }
 
   function renderSyncCardUI() {
-    const syncSection = document.getElementById('sync-card-section');
     const enableToggle = document.getElementById('sync-enable-toggle');
     const moodToggle = document.getElementById('sync-mood-toggle');
-    const controlsWrap = document.getElementById('sync-controls-body');
     const authBox = document.getElementById('sync-auth-box');
     const sessionBox = document.getElementById('sync-session-box');
     const emailLabel = document.getElementById('sync-user-email');
+    const jsonInput = document.getElementById('sync-firebase-json-input');
 
-    // Si no hay configuración de Firebase en el código, la opción de sincronizar no aparece
-    if (!hasFirebaseConfig()) {
-      if (syncSection) syncSection.style.display = 'none';
-      setVisualSyncStatus(navigator.onLine ? 'local' : 'offline');
-      return;
-    }
-
-    if (syncSection) syncSection.style.display = 'block';
     if (enableToggle) enableToggle.checked = Boolean(syncPrefs.enabled);
     if (moodToggle) moodToggle.checked = Boolean(syncPrefs.syncMood);
-    if (controlsWrap) {
-      controlsWrap.style.display = syncPrefs.enabled ? 'block' : 'none';
+
+    const customCfg = getStoredCustomFirebaseConfig();
+    if (jsonInput && customCfg && document.activeElement !== jsonInput) {
+      jsonInput.value = JSON.stringify(customCfg, null, 2);
     }
 
     if (fbRuntime.user) {
@@ -551,10 +588,30 @@
     setVisualSyncStatus(navigator.onLine ? (fbRuntime.user && syncPrefs.enabled ? 'synced' : 'local') : 'offline');
   }
 
+  function parseFlexibleFirebaseConfig(rawText) {
+    const trimmed = String(rawText || '').trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed);
+    } catch (e) {
+      // Extraer pares clave: "valor" si pegaron el fragmento JS de Firebase Console
+      const keys = ['apiKey', 'authDomain', 'projectId', 'storageBucket', 'messagingSenderId', 'appId'];
+      const out = {};
+      keys.forEach(function (k) {
+        const m = trimmed.match(new RegExp(k + '\\s*:\\s*["\']([^"\']+)["\']'));
+        if (m && m[1]) out[k] = m[1];
+      });
+      return out.apiKey ? out : null;
+    }
+  }
+
   function setupSyncEvents() {
     const enableToggle = document.getElementById('sync-enable-toggle');
     const moodToggle = document.getElementById('sync-mood-toggle');
     const preBackupBtn = document.getElementById('btn-sync-prebackup');
+    const localMergeBtn = document.getElementById('btn-sync-local-merge-test');
+    const saveCfgBtn = document.getElementById('btn-save-firebase-config');
+    const clearCfgBtn = document.getElementById('btn-clear-firebase-config');
     const loginBtn = document.getElementById('btn-sync-login');
     const regBtn = document.getElementById('btn-sync-register');
     const syncNowBtn = document.getElementById('btn-sync-now');
@@ -566,9 +623,13 @@
         saveSyncPrefs();
         renderSyncCardUI();
         if (syncPrefs.enabled) {
-          ensureFirebaseSdkLoaded().then(function () {
-            if (fbRuntime.user) performCloudSync('toggle-on');
-          });
+          if (hasFirebaseConfig()) {
+            ensureFirebaseSdkLoaded().then(function () {
+              if (fbRuntime.user) performCloudSync('toggle-on');
+            });
+          } else {
+            runLocalMergeCheckAndReport();
+          }
         }
       });
     }
@@ -591,12 +652,65 @@
       });
     }
 
+    if (localMergeBtn) {
+      localMergeBtn.addEventListener('click', function () {
+        runLocalMergeCheckAndReport();
+      });
+    }
+
+    if (saveCfgBtn) {
+      saveCfgBtn.addEventListener('click', function () {
+        const jsonInput = document.getElementById('sync-firebase-json-input');
+        const parsed = parseFlexibleFirebaseConfig(jsonInput ? jsonInput.value : '');
+        if (!parsed || !parsed.apiKey || !parsed.projectId) {
+          if (window.WilconApp && window.WilconApp.showToast) {
+            window.WilconApp.showToast('⚠️ Pega el objeto firebaseConfig con al menos apiKey y projectId.');
+          }
+          return;
+        }
+        try {
+          window.localStorage.setItem(CUSTOM_FB_CFG_KEY, JSON.stringify(parsed));
+        } catch (e) {}
+        fbRuntime.loaded = false;
+        syncPrefs.enabled = true;
+        saveSyncPrefs();
+        renderSyncCardUI();
+        if (window.WilconApp && window.WilconApp.showToast) {
+          window.WilconApp.showToast('✅ Credenciales de Firebase guardadas. Ahora puedes iniciar sesión abajo.');
+        }
+        ensureFirebaseSdkLoaded();
+      });
+    }
+
+    if (clearCfgBtn) {
+      clearCfgBtn.addEventListener('click', function () {
+        try {
+          window.localStorage.removeItem(CUSTOM_FB_CFG_KEY);
+        } catch (e) {}
+        const jsonInput = document.getElementById('sync-firebase-json-input');
+        if (jsonInput) jsonInput.value = '';
+        renderSyncCardUI();
+        if (window.WilconApp && window.WilconApp.showToast) {
+          window.WilconApp.showToast('Credenciales personalizadas eliminadas.');
+        }
+      });
+    }
+
     async function handleAuthSubmit(mode) {
       const emailIn = document.getElementById('sync-email');
       const passIn = document.getElementById('sync-password');
       const summaryEl = document.getElementById('sync-merge-summary');
       const email = emailIn ? emailIn.value.trim() : '';
       const pass = passIn ? passIn.value : '';
+
+      if (!hasFirebaseConfig()) {
+        const detailsEl = document.getElementById('sync-firebase-config-details');
+        if (detailsEl) detailsEl.open = true;
+        if (window.WilconApp && window.WilconApp.showToast) {
+          window.WilconApp.showToast('⚙️ Primero pega tus credenciales firebaseConfig en la sección desplegable de arriba.');
+        }
+        return;
+      }
 
       if (!email || pass.length < 6) {
         if (window.WilconApp && window.WilconApp.showToast) {
@@ -605,10 +719,12 @@
         return;
       }
 
+      syncPrefs.enabled = true;
+      saveSyncPrefs();
       const ready = await ensureFirebaseSdkLoaded();
       if (!ready || !fbRuntime.auth) {
         if (window.WilconApp && window.WilconApp.showToast) {
-          window.WilconApp.showToast('⚠️ Verifica tu conexión a internet para iniciar sesión.');
+          window.WilconApp.showToast('⚠️ Verifica tu conexión a internet y tus credenciales de Firebase.');
         }
         return;
       }
@@ -625,7 +741,7 @@
       } catch (err) {
         if (summaryEl) {
           summaryEl.style.display = 'block';
-          summaryEl.textContent = '⚠️ Error de autenticación: verifica tu correo y contraseña.';
+          summaryEl.textContent = '⚠️ Error de autenticación: verifica tu correo, contraseña y que Email/Password esté activo en Firebase.';
         }
         setVisualSyncStatus(navigator.onLine ? 'local' : 'offline');
       }
@@ -652,8 +768,6 @@
       });
     }
 
-    // Disparadores automáticos requeridos:
-    // 1. Al volver la conexión (evento online / offline)
     window.addEventListener('online', function () {
       if (window.WilconApp && window.WilconApp.setWilconReaction) {
         window.WilconApp.setWilconReaction('purring', '🟢 ¡Volvió la conexión a internet!', 2200);
@@ -675,14 +789,12 @@
       }
     });
 
-    // 2. Al volver a primer plano (visibilitychange)
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible' && syncPrefs.enabled && navigator.onLine) {
         performCloudSync('visibilitychange');
       }
     });
 
-    // 3. Al guardar cambios locales
     window.addEventListener('wilcon:local-change', function () {
       scheduleDebouncedSync();
     });
@@ -696,7 +808,6 @@
     setupSyncEvents();
     renderSyncCardUI();
 
-    // Si la sincronización ya estaba activa al abrir la app y hay red, sincronizar
     if (syncPrefs.enabled && hasFirebaseConfig() && navigator.onLine) {
       ensureFirebaseSdkLoaded();
     }
