@@ -1272,68 +1272,42 @@
             </div>
           </article>
 
-          <!-- Tarjeta de Sincronización Opcional con Firebase (Siempre visible en la pestaña Respaldo) -->
-          <article id="sync-card-section" class="card blue-rose-card reveal-card">
+          <!-- Tarjeta de Sincronización Opcional con Firebase (Oculta si no hay FIREBASE_CONFIG en el código) -->
+          <article id="sync-card-section" class="card reveal-card" style="display:none;">
             <div class="card-header">
               <div>
-                <h3 class="card-title">☁️ Sincronización entre Dispositivos (Celular y Laptop)</h3>
-                <p class="card-subtitle">Sincroniza tu horario, entregas y promedios cuando haya conexión a internet</p>
+                <h3 class="card-title">☁️ Sincronización Opcional entre Dispositivos</h3>
+                <p class="card-subtitle">Mantén tu horario, entregas y promedios al día entre tu celular y tu laptop</p>
               </div>
-              <span id="sync-status-badge" class="badge badge-blue" aria-live="polite">🔒 Solo en este dispositivo</span>
+              <span id="sync-status-badge" class="badge badge-purple" aria-live="polite">🔒 Solo en este dispositivo</span>
             </div>
 
             <div class="stat-tile" style="margin-bottom:12px;">
-              <p style="font-size:0.88rem; margin-bottom:8px;">
-                🔒 <strong>Aviso en lenguaje sencillo:</strong> Por defecto todo se guarda solo en tu dispositivo. Al activar la sincronización, tus datos seleccionados se guardan en <strong>servidores de Google (Firebase)</strong> dentro de tu cuenta privada para que los veas actualizados en tu celular y tu laptop.
+              <p style="font-size:0.88rem;">
+                🔒 <strong>Aviso en lenguaje sencillo:</strong> Por defecto todo se guarda solo en tu dispositivo. Al activar esta opción, tus datos se guardan en <strong>servidores de Google (Firebase)</strong> dentro de tu cuenta privada para sincronizar tus dispositivos cuando haya internet.
               </p>
-              <div class="input-row" style="flex-wrap:wrap; justify-content:space-between;">
-                <label for="sync-enable-toggle" style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:800; min-height:44px;">
-                  <input type="checkbox" id="sync-enable-toggle" style="width:20px; height:20px;">
-                  <span>☁️ Activar sincronización entre dispositivos</span>
-                </label>
-                <button type="button" id="btn-sync-now" class="btn btn-primary">
-                  🔄 Sincronizar ahora
-                </button>
-              </div>
+              <label for="sync-enable-toggle" style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:800; min-height:44px; margin-top:6px;">
+                <input type="checkbox" id="sync-enable-toggle" style="width:20px; height:20px;">
+                <span>Activar sincronización entre mis dispositivos</span>
+              </label>
             </div>
 
-            <div id="sync-controls-body">
+            <div id="sync-controls-body" style="display:none;">
               <div class="stat-tile" style="margin-bottom:12px;">
                 <label for="sync-mood-toggle" style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:700; min-height:44px;">
                   <input type="checkbox" id="sync-mood-toggle" style="width:20px; height:20px;">
-                  <span>Sincronizar también mi «Ánimo del día» (si está apagado, tu ánimo se queda solo en este dispositivo)</span>
+                  <span>Sincronizar también mi «Ánimo del día» (si lo dejas apagado, tu ánimo se queda solo en este dispositivo)</span>
                 </label>
-                <div class="input-row" style="margin-top:8px; flex-wrap:wrap;">
+                <div style="margin-top:6px;">
                   <button type="button" id="btn-sync-prebackup" class="btn btn-secondary">
                     ⬇️ Exportar respaldo JSON antes de sincronizar
-                  </button>
-                  <button type="button" id="btn-sync-local-merge-test" class="btn btn-blue">
-                    ✨ Probar fusión inteligente ahora
                   </button>
                 </div>
               </div>
 
-              <!-- Configuración rápida de Firebase (por si no se ha pegado en js/pwa-sync.js) -->
-              <details id="sync-firebase-config-details" class="stat-tile" style="margin-bottom:12px;">
-                <summary style="cursor:pointer; font-weight:800; color:var(--primary);">
-                  ⚙️ Conexión a proyecto de Firebase (pegar credenciales o ver estado)
-                </summary>
-                <div style="margin-top:10px; display:flex; flex-direction:column; gap:8px;">
-                  <p class="card-subtitle">
-                    Puedes pegar aquí el bloque <code>firebaseConfig</code> de tu consola de Firebase (o ponerlo en <code>js/pwa-sync.js</code> como indica <code>firebase-setup.md</code>):
-                  </p>
-                  <label class="form-label" for="sync-firebase-json-input">Objeto o JSON de firebaseConfig:</label>
-                  <textarea id="sync-firebase-json-input" class="form-textarea" placeholder='{"apiKey":"...","authDomain":"...","projectId":"...","appId":"..."}'></textarea>
-                  <div class="input-row" style="flex-wrap:wrap;">
-                    <button type="button" id="btn-save-firebase-config" class="btn btn-primary">💾 Guardar credenciales de Firebase</button>
-                    <button type="button" id="btn-clear-firebase-config" class="btn btn-secondary">Limpiar credenciales</button>
-                  </div>
-                </div>
-              </details>
-
               <!-- Formulario de Correo y Contraseña (sin redirecciones) -->
               <div id="sync-auth-box" class="stat-tile">
-                <h4 style="font-weight:800; margin-bottom:6px;">🔑 Cuenta de sincronización (Correo y Contraseña)</h4>
+                <h4 style="font-weight:800; margin-bottom:6px;">🔑 Conecta tu cuenta privada</h4>
                 <div class="grid-2">
                   <div class="form-group">
                     <label class="form-label" for="sync-email">Correo electrónico</label>
@@ -1345,24 +1319,23 @@
                   </div>
                 </div>
                 <div class="input-row" style="margin-top:10px; flex-wrap:wrap;">
-                  <button type="button" id="btn-sync-login" class="btn btn-primary">☁️ Iniciar sesión y sincronizar</button>
-                  <button type="button" id="btn-sync-register" class="btn btn-blue">✨ Crear cuenta y sincronizar</button>
+                  <button type="button" id="btn-sync-login" class="btn btn-primary">☁️ Iniciar sesión y fusionar</button>
+                  <button type="button" id="btn-sync-register" class="btn btn-blue">✨ Crear cuenta y fusionar</button>
                 </div>
               </div>
 
               <!-- Sesión activa -->
-              <div id="sync-session-box" class="stat-tile" style="display:none; margin-top:10px;">
+              <div id="sync-session-box" class="stat-tile" style="display:none;">
                 <p style="font-weight:700; margin-bottom:8px;">
-                  Conectada en la nube como: <strong id="sync-user-email"></strong>
+                  Conectada como: <strong id="sync-user-email"></strong>
                 </p>
                 <div class="input-row" style="flex-wrap:wrap;">
+                  <button type="button" id="btn-sync-now" class="btn btn-primary">🔄 Sincronizar ahora</button>
                   <button type="button" id="btn-sync-logout" class="btn btn-secondary">Cerrar sesión</button>
                 </div>
               </div>
 
-              <div id="sync-merge-summary" class="calc-output" aria-live="polite" style="margin-top:12px;">
-                Estado de sincronización: Modo local activo. Activa la casilla superior o pulsa «🔄 Sincronizar ahora» para fusionar y respaldar tus datos.
-              </div>
+              <div id="sync-merge-summary" class="calc-output" aria-live="polite" style="display:none; margin-top:12px;"></div>
             </div>
           </article>
         </section>
