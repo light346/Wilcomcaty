@@ -24,7 +24,7 @@
   messagingSenderId: "434548407283",
   appId: "1:434548407283:web:22f4a9f8d05091f59df086",
   measurementId: "G-1H37RY8S0X"
-  };
+};
 
   // Versión fija del SDK modular oficial de Firebase (se carga solo bajo demanda)
   const FIREBASE_SDK_BASE = 'https://www.gstatic.com/firebasejs/10.14.1';
