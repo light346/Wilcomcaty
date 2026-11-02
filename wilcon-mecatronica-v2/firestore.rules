@@ -1,0 +1,20 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Regla estricta por propietario: cada usuaria solo puede leer y escribir
+    // dentro de su propia ruta users/{userId}/...
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      match /{document=**} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    // Bloquear cualquier otra ruta por defecto
+    match /{allOtherPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
