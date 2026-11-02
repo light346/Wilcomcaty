@@ -618,6 +618,8 @@
     ensureSyncMetadataOnState(state);
   }
 
+  let isApplyingRemoteChanges = false;
+
   function saveState(skipSyncEvent) {
     ensureSyncMetadataOnState(state);
     try {
@@ -625,7 +627,7 @@
     } catch (err) {
       // Fallback silencioso en memoria
     }
-    if (!skipSyncEvent && typeof window !== 'undefined' && window.dispatchEvent) {
+    if (!skipSyncEvent && !isApplyingRemoteChanges && typeof window !== 'undefined' && window.dispatchEvent) {
       window.dispatchEvent(new CustomEvent('wilcon:local-change'));
     }
   }
@@ -1431,7 +1433,7 @@
       );
     }).join('');
 
-    calculateAndRenderGrades();
+    renderGradesSummaryOnly();
   }
 
   function syncCourseFromInputs() {
@@ -1465,6 +1467,10 @@
 
   function calculateAndRenderGrades() {
     syncCourseFromInputs();
+    renderGradesSummaryOnly();
+  }
+
+  function renderGradesSummaryOnly() {
     const course = getActiveGradeCourse();
     const outBox = document.getElementById('grade-results-box');
     if (!course || !outBox) return;
@@ -2585,9 +2591,17 @@
   window.WilconApp = {
     getState: function () { return state; },
     setStateFromSync: function (newState) {
-      state = newState;
-      saveState(true);
-      renderAll();
+      isApplyingRemoteChanges = true;
+      try {
+        state = newState;
+        saveState(true);
+        renderAll();
+      } finally {
+        isApplyingRemoteChanges = false;
+      }
+    },
+    isWilconBusy: function () {
+      return wilconTempTimer !== null;
     },
     exportBackup: exportBackupJson,
     setWilconReaction: setWilconReaction,

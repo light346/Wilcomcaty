@@ -2,17 +2,15 @@
    Módulo PWA + Sincronización Opcional en la Nube (Firebase Modular v10.14.1)
    - Registra el Service Worker (./sw.js) y gestiona el aviso de actualización
    - Solicita almacenamiento persistente (navigator.storage.persist)
-   - Muestra estado de red («En línea» / «Sin conexión» / «Sincronizando» / «Al día»)
-   - Tarjeta y botones de sincronización siempre visibles en la pestaña Respaldo
+   - Muestra estado de sincronización SOLO en la insignia del encabezado y en
+     la sección Respaldo (con debounce de 500 ms y sin repetir el mismo estado)
+   - Previene bucles infinitos con bandera applyingRemote, comparación de huella
+     de contenido y filtrado de snapshots con hasPendingWrites / fromCache
    ========================================================================== */
 
 (function () {
   'use strict';
 
-  /* ------------------------------------------------------------------------
-     CONFIGURACIÓN OPCIONAL DE FIREBASE EN CÓDIGO
-     También puede pegarse directamente desde la pestaña «Respaldo» en la app.
-     ------------------------------------------------------------------------ */
   const firebaseConfig = {
   apiKey: "AIzaSyA3gIh3hCASd9RV3nRccycNBplI5QYIZmE",
   authDomain: "wilcomcat.firebaseapp.com",
@@ -135,18 +133,46 @@
     return payload;
   }
 
+  /**
+   * Calcula una huella determinista del contenido sincronizable (sin el timestamp global)
+   * para comparar antes de escribir en local o en Firestore y evitar bucles.
+   */
+  function computeSyncFingerprint(docOrState, includeMood) {
+    if (!docOrState || typeof docOrState !== 'object') return '';
+    const sortById = function (arr) {
+      return (Array.isArray(arr) ? arr.slice() : []).sort(function (a, b) {
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
+    };
+    const canonical = {
+      schedule: sortById(docOrState.schedule),
+      tasks: sortById(docOrState.tasks),
+      courses: sortById(docOrState.grades && docOrState.grades.courses)
+    };
+    if (includeMood && docOrState.mood) {
+      canonical.mood = {
+        streak: docOrState.mood.streak || 1,
+        lastDate: docOrState.mood.lastDate || '',
+        history: sortById(docOrState.mood.history)
+      };
+    }
+    return JSON.stringify(canonical);
+  }
+
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
       mergeRecordsById: mergeRecordsById,
       mergeAppState: mergeAppState,
-      buildCloudPayload: buildCloudPayload
+      buildCloudPayload: buildCloudPayload,
+      computeSyncFingerprint: computeSyncFingerprint
     };
   }
   if (typeof window !== 'undefined') {
     window.WilconSyncEngine = {
       mergeRecordsById: mergeRecordsById,
       mergeAppState: mergeAppState,
-      buildCloudPayload: buildCloudPayload
+      buildCloudPayload: buildCloudPayload,
+      computeSyncFingerprint: computeSyncFingerprint
     };
   }
 
@@ -179,13 +205,6 @@
     const banner = document.getElementById('pwa-update-banner');
     if (banner) {
       banner.style.display = 'flex';
-    }
-    if (window.WilconApp && window.WilconApp.setWilconReaction) {
-      window.WilconApp.setWilconReaction(
-        'starry',
-        '✨ ¡Miau! Hay una versión nueva lista. Toca «Actualizar» arriba cuando gustes.',
-        3600
-      );
     }
   }
 
@@ -291,7 +310,7 @@
   }
 
   /* ========================================================================
-     FASE 2 · SINCRONIZACIÓN OPCIONAL CON FIREBASE (SIEMPRE VISIBLE EN RESPALDO)
+     FASE 2 · SINCRONIZACIÓN OPCIONAL CON FIREBASE (SIN BUCLES NI PISAR AL GATO)
      ======================================================================== */
   let syncPrefs = {
     enabled: false,
@@ -308,7 +327,14 @@
     mods: null,
     user: null,
     syncing: false,
-    debounceTimer: null
+    applyingRemote: false,
+    unsubscribeSnapshot: null,
+    lastSyncedFingerprint: '',
+    debounceTimer: null,
+    statusDebounceTimer: null,
+    lastVisualStatusSignature: '',
+    greetedThisSession: false,
+    needsReconnectGreeting: false
   };
 
   function getStoredCustomFirebaseConfig() {
@@ -353,12 +379,53 @@
     } catch (e) {}
   }
 
-  function setVisualSyncStatus(statusKey, customDetail) {
+  /**
+   * Aviso ocasional para el gato: solo cuando termina de sincronizar por primera vez
+   * en la sesión o tras reconectarse, dura máximo 2.5s (< 3s) y NUNCA reemplaza un
+   * mensaje o gesto que el gato esté mostrando en ese momento (además restaura el texto previo).
+   */
+  function maybeShowOccasionalCatSyncGreeting() {
+    if (!fbRuntime.greetedThisSession || fbRuntime.needsReconnectGreeting) {
+      fbRuntime.greetedThisSession = true;
+      fbRuntime.needsReconnectGreeting = false;
+
+      if (!window.WilconApp || typeof window.WilconApp.isWilconBusy !== 'function') return;
+      if (window.WilconApp.isWilconBusy()) return;
+
+      const speechEl = document.getElementById('wilcon-speech');
+      const cardEl = document.getElementById('mascot-card');
+      if (!speechEl || !cardEl) return;
+      if (cardEl.getAttribute('data-wilcon-state') !== 'awake') return;
+
+      const previousText = speechEl.textContent;
+      window.WilconApp.setWilconReaction('purring', '☁️🐾 ¡Listo! Tus apuntes están sincronizados.', 2500);
+      setTimeout(function () {
+        if (!window.WilconApp.isWilconBusy() && speechEl.textContent === '☁️🐾 ¡Listo! Tus apuntes están sincronizados.') {
+          speechEl.textContent = previousText;
+        }
+      }, 2600);
+    }
+  }
+
+  /**
+   * Actualiza el estado visible SOLO en la insignia del encabezado (#net-status-pill)
+   * y en la sección Respaldo (#sync-status-badge), nunca en la burbuja del gato.
+   * No repite el mismo estado y aplica un debounce de 500 ms.
+   */
+  function applyVisualSyncStatusNow(statusKey, customDetail) {
+    const isOnline = navigator.onLine !== false;
+    const effectiveKey = !isOnline ? 'offline' : statusKey;
+    const signature = effectiveKey + '|' + (customDetail || '') + '|' + Boolean(syncPrefs.enabled) + '|' + Boolean(fbRuntime.user);
+
+    if (fbRuntime.lastVisualStatusSignature === signature) {
+      return;
+    }
+    fbRuntime.lastVisualStatusSignature = signature;
+
     const netPill = document.getElementById('net-status-pill');
     const syncBadge = document.getElementById('sync-status-badge');
-    const isOnline = navigator.onLine !== false;
 
-    if (!isOnline || statusKey === 'offline') {
+    if (effectiveKey === 'offline') {
       if (netPill) {
         netPill.textContent = '📴 Sin conexión';
         netPill.className = 'badge badge-warning';
@@ -370,7 +437,7 @@
       return;
     }
 
-    if (statusKey === 'syncing') {
+    if (effectiveKey === 'syncing') {
       if (netPill) {
         netPill.textContent = '🔄 Sincronizando...';
         netPill.className = 'badge badge-blue';
@@ -379,13 +446,10 @@
         syncBadge.textContent = '🔄 Sincronizando...';
         syncBadge.className = 'badge badge-blue';
       }
-      if (window.WilconApp && window.WilconApp.setWilconReaction) {
-        window.WilconApp.setWilconReaction('purring', '☁️🐾 Sincronizando tus apuntes con la nube...', 2000);
-      }
       return;
     }
 
-    if (statusKey === 'synced') {
+    if (effectiveKey === 'synced') {
       if (netPill) {
         netPill.textContent = '☁️ Al día';
         netPill.className = 'badge badge-success';
@@ -393,9 +457,6 @@
       if (syncBadge) {
         syncBadge.textContent = customDetail || '☁️ Al día en tus dispositivos';
         syncBadge.className = 'badge badge-success';
-      }
-      if (window.WilconApp && window.WilconApp.setWilconReaction) {
-        window.WilconApp.setWilconReaction('starry', '☁️💙 ¡Tus datos están al día entre tus dispositivos!', 2400);
       }
       return;
     }
@@ -414,6 +475,76 @@
       }
       syncBadge.className = 'badge badge-blue';
     }
+  }
+
+  function setVisualSyncStatus(statusKey, customDetail, immediate) {
+    if (fbRuntime.statusDebounceTimer) {
+      clearTimeout(fbRuntime.statusDebounceTimer);
+      fbRuntime.statusDebounceTimer = null;
+    }
+    if (immediate) {
+      applyVisualSyncStatusNow(statusKey, customDetail);
+      return;
+    }
+    fbRuntime.statusDebounceTimer = setTimeout(function () {
+      applyVisualSyncStatusNow(statusKey, customDetail);
+    }, 500);
+  }
+
+  function attachRealtimeSnapshotListener() {
+    if (!fbRuntime.user || !fbRuntime.db || !fbRuntime.mods || typeof fbRuntime.mods.fsMod.onSnapshot !== 'function') {
+      return;
+    }
+    if (fbRuntime.unsubscribeSnapshot) {
+      fbRuntime.unsubscribeSnapshot();
+      fbRuntime.unsubscribeSnapshot = null;
+    }
+    const uid = fbRuntime.user.uid;
+    const fsMod = fbRuntime.mods.fsMod;
+    const userDocRef = fsMod.doc(fbRuntime.db, 'users', uid, 'appdata', 'main');
+
+    fbRuntime.unsubscribeSnapshot = fsMod.onSnapshot(
+      userDocRef,
+      { includeMetadataChanges: true },
+      function (snap) {
+        // Ignorar snapshots que reflejan escrituras locales pendientes o lecturas de caché local
+        if (!snap || !snap.exists()) return;
+        if (snap.metadata && (snap.metadata.hasPendingWrites || snap.metadata.fromCache)) {
+          return;
+        }
+        if (fbRuntime.syncing || fbRuntime.applyingRemote) {
+          return;
+        }
+
+        const remoteData = snap.data() || {};
+        const remoteFp = computeSyncFingerprint(remoteData, syncPrefs.syncMood);
+        const localState = window.WilconApp.getState();
+        const localFp = computeSyncFingerprint(localState, syncPrefs.syncMood);
+
+        // Si el contenido remoto ya es idéntico al local, no hacer nada (evita bucle)
+        if (remoteFp === localFp) {
+          fbRuntime.lastSyncedFingerprint = localFp;
+          return;
+        }
+
+        fbRuntime.applyingRemote = true;
+        try {
+          const mergeResult = mergeAppState(localState, remoteData, syncPrefs.syncMood);
+          const mergedFp = computeSyncFingerprint(mergeResult.mergedState, syncPrefs.syncMood);
+          if (mergedFp !== localFp) {
+            window.WilconApp.setStateFromSync(mergeResult.mergedState);
+          }
+          fbRuntime.lastSyncedFingerprint = mergedFp;
+          const timeStr = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+          setVisualSyncStatus('synced', '☁️ Al día (' + timeStr + ')');
+        } finally {
+          fbRuntime.applyingRemote = false;
+        }
+      },
+      function () {
+        // Silenciar errores de escucha desconectada
+      }
+    );
   }
 
   async function ensureFirebaseSdkLoaded() {
@@ -439,7 +570,11 @@
         fbRuntime.user = user || null;
         renderSyncCardUI();
         if (user && syncPrefs.enabled && navigator.onLine) {
+          attachRealtimeSnapshotListener();
           performCloudSync('auth-ready');
+        } else if (!user && fbRuntime.unsubscribeSnapshot) {
+          fbRuntime.unsubscribeSnapshot();
+          fbRuntime.unsubscribeSnapshot = null;
         }
       });
 
@@ -452,30 +587,49 @@
     }
   }
 
-  function runLocalMergeCheckAndReport() {
-    if (!window.WilconApp) return;
+  function runLocalMergeCheckAndReport(reason) {
+    if (!window.WilconApp || fbRuntime.applyingRemote) return;
     const localState = window.WilconApp.getState();
-    const mergeResult = mergeAppState(localState, {}, syncPrefs.syncMood);
-    window.WilconApp.setStateFromSync(mergeResult.mergedState);
+    const localFp = computeSyncFingerprint(localState, syncPrefs.syncMood);
+
+    // Si es un cambio automático y el contenido ya fue procesado sin cambios reales, no repetir
+    if (reason === 'local-change' && fbRuntime.lastSyncedFingerprint === localFp) {
+      return;
+    }
+
+    setVisualSyncStatus('syncing', '', true);
+    fbRuntime.applyingRemote = true;
+    let mergeResult;
+    try {
+      mergeResult = mergeAppState(localState, {}, syncPrefs.syncMood);
+      const mergedFp = computeSyncFingerprint(mergeResult.mergedState, syncPrefs.syncMood);
+      if (mergedFp !== localFp) {
+        window.WilconApp.setStateFromSync(mergeResult.mergedState);
+      }
+      fbRuntime.lastSyncedFingerprint = mergedFp;
+    } finally {
+      fbRuntime.applyingRemote = false;
+    }
+
     const timeStr = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
     const summaryEl = document.getElementById('sync-merge-summary');
     if (summaryEl) {
       summaryEl.style.display = 'block';
       summaryEl.innerHTML =
-        '<strong>✨ Verificación y fusión local completada (' + timeStr + ')</strong><br>' +
-        '<span>Registros listos con metadatos de sincronización (<code>id</code>, <code>updatedAt</code>, <code>deleted</code>): ' +
+        '<strong>✨ Sincronización local verificada (' + timeStr + ')</strong><br>' +
+        '<span>Registros al día (<code>id</code>, <code>updatedAt</code>, <code>deleted</code>): ' +
         '<strong>' + mergeResult.stats.activeSchedule + '</strong> clases, ' +
         '<strong>' + mergeResult.stats.activeTasks + '</strong> entregas activas y ' +
         '<strong>' + mergeResult.stats.activeCourses + '</strong> materias (' +
         mergeResult.stats.tombstones + ' borrados lógicos registrados).</span>';
     }
     setVisualSyncStatus('synced', '☁️ Al día (' + timeStr + ')');
-    if (window.WilconApp.showToast) {
-      window.WilconApp.showToast('☁️💙 Registros verificados y fusionados al día.');
-    }
+    maybeShowOccasionalCatSyncGreeting();
   }
 
   async function performCloudSync(reason) {
+    if (fbRuntime.applyingRemote || fbRuntime.syncing) return;
+
     const summaryEl = document.getElementById('sync-merge-summary');
     if (!navigator.onLine) {
       setVisualSyncStatus('offline');
@@ -486,8 +640,7 @@
     }
 
     if (!hasFirebaseConfig()) {
-      // Si aún no ha configurado credenciales de Firebase, ejecuta la verificación/fusión local y guía al usuario
-      runLocalMergeCheckAndReport();
+      runLocalMergeCheckAndReport(reason);
       const detailsEl = document.getElementById('sync-firebase-config-details');
       if (detailsEl && reason === 'manual') {
         detailsEl.open = true;
@@ -495,11 +648,12 @@
       return;
     }
 
-    if (!syncPrefs.enabled) {
+    if (!syncPrefs.enabled && reason === 'manual') {
       syncPrefs.enabled = true;
       saveSyncPrefs();
       renderSyncCardUI();
     }
+    if (!syncPrefs.enabled) return;
 
     const ok = await ensureFirebaseSdkLoaded();
     if (!ok || !fbRuntime.user || !fbRuntime.db) {
@@ -509,9 +663,14 @@
       return;
     }
 
-    if (fbRuntime.syncing) return;
+    const localStateBefore = window.WilconApp.getState();
+    const localFpBefore = computeSyncFingerprint(localStateBefore, syncPrefs.syncMood);
+    if (reason === 'local-change' && fbRuntime.lastSyncedFingerprint === localFpBefore) {
+      return;
+    }
+
     fbRuntime.syncing = true;
-    setVisualSyncStatus('syncing');
+    setVisualSyncStatus('syncing', '', true);
 
     try {
       const uid = fbRuntime.user.uid;
@@ -519,14 +678,30 @@
       const userDocRef = fsMod.doc(fbRuntime.db, 'users', uid, 'appdata', 'main');
       const snap = await fsMod.getDoc(userDocRef);
       const remoteData = snap.exists() ? snap.data() : {};
+      const remoteFp = computeSyncFingerprint(remoteData, syncPrefs.syncMood);
 
       const localState = window.WilconApp.getState();
+      const localFp = computeSyncFingerprint(localState, syncPrefs.syncMood);
       const mergeResult = mergeAppState(localState, remoteData, syncPrefs.syncMood);
+      const mergedFp = computeSyncFingerprint(mergeResult.mergedState, syncPrefs.syncMood);
 
-      window.WilconApp.setStateFromSync(mergeResult.mergedState);
+      // Aplicar en local solo si el resultado fusionado difiere del local actual
+      if (mergedFp !== localFp) {
+        fbRuntime.applyingRemote = true;
+        try {
+          window.WilconApp.setStateFromSync(mergeResult.mergedState);
+        } finally {
+          fbRuntime.applyingRemote = false;
+        }
+      }
 
-      const payload = buildCloudPayload(mergeResult.mergedState, syncPrefs.syncMood);
-      await fsMod.setDoc(userDocRef, payload, { merge: true });
+      // Escribir en Firestore solo si el resultado fusionado difiere de lo que ya está en Firestore
+      if (!snap.exists() || mergedFp !== remoteFp) {
+        const payload = buildCloudPayload(mergeResult.mergedState, syncPrefs.syncMood);
+        await fsMod.setDoc(userDocRef, payload, { merge: true });
+      }
+
+      fbRuntime.lastSyncedFingerprint = mergedFp;
 
       const timeStr = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
       if (summaryEl) {
@@ -541,6 +716,7 @@
       syncPrefs.firstMergeDone = true;
       saveSyncPrefs();
       setVisualSyncStatus('synced', '☁️ Al día (' + timeStr + ')');
+      maybeShowOccasionalCatSyncGreeting();
     } catch (err) {
       if (summaryEl) {
         summaryEl.style.display = 'block';
@@ -553,11 +729,19 @@
   }
 
   function scheduleDebouncedSync() {
-    if (!syncPrefs.enabled || !fbRuntime.user || !navigator.onLine) return;
+    if (fbRuntime.applyingRemote || fbRuntime.syncing) return;
+    if (!syncPrefs.enabled || !navigator.onLine) return;
+
+    const currentState = window.WilconApp ? window.WilconApp.getState() : null;
+    const currentFp = computeSyncFingerprint(currentState, syncPrefs.syncMood);
+    if (currentFp && currentFp === fbRuntime.lastSyncedFingerprint) {
+      return;
+    }
+
     if (fbRuntime.debounceTimer) clearTimeout(fbRuntime.debounceTimer);
     fbRuntime.debounceTimer = setTimeout(function () {
       performCloudSync('local-change');
-    }, 1200);
+    }, 500);
   }
 
   function renderSyncCardUI() {
@@ -585,7 +769,11 @@
       if (sessionBox) sessionBox.style.display = 'none';
     }
 
-    setVisualSyncStatus(navigator.onLine ? (fbRuntime.user && syncPrefs.enabled ? 'synced' : 'local') : 'offline');
+    setVisualSyncStatus(
+      navigator.onLine ? (syncPrefs.enabled && (fbRuntime.user || !hasFirebaseConfig()) ? 'synced' : 'local') : 'offline',
+      '',
+      true
+    );
   }
 
   function parseFlexibleFirebaseConfig(rawText) {
@@ -594,7 +782,6 @@
     try {
       return JSON.parse(trimmed);
     } catch (e) {
-      // Extraer pares clave: "valor" si pegaron el fragmento JS de Firebase Console
       const keys = ['apiKey', 'authDomain', 'projectId', 'storageBucket', 'messagingSenderId', 'appId'];
       const out = {};
       keys.forEach(function (k) {
@@ -628,7 +815,7 @@
               if (fbRuntime.user) performCloudSync('toggle-on');
             });
           } else {
-            runLocalMergeCheckAndReport();
+            runLocalMergeCheckAndReport('toggle-on');
           }
         }
       });
@@ -638,7 +825,7 @@
       moodToggle.addEventListener('change', function () {
         syncPrefs.syncMood = moodToggle.checked;
         saveSyncPrefs();
-        if (syncPrefs.enabled && fbRuntime.user) {
+        if (syncPrefs.enabled) {
           performCloudSync('mood-toggle');
         }
       });
@@ -654,7 +841,7 @@
 
     if (localMergeBtn) {
       localMergeBtn.addEventListener('click', function () {
-        runLocalMergeCheckAndReport();
+        runLocalMergeCheckAndReport('manual-test');
       });
     }
 
@@ -676,7 +863,7 @@
         saveSyncPrefs();
         renderSyncCardUI();
         if (window.WilconApp && window.WilconApp.showToast) {
-          window.WilconApp.showToast('✅ Credenciales de Firebase guardadas. Ahora puedes iniciar sesión abajo.');
+          window.WilconApp.showToast('✅ Credenciales de Firebase guardadas.');
         }
         ensureFirebaseSdkLoaded();
       });
@@ -730,7 +917,7 @@
       }
 
       try {
-        setVisualSyncStatus('syncing');
+        setVisualSyncStatus('syncing', '', true);
         if (mode === 'register') {
           await fbRuntime.mods.authMod.createUserWithEmailAndPassword(fbRuntime.auth, email, pass);
         } else {
@@ -743,7 +930,7 @@
           summaryEl.style.display = 'block';
           summaryEl.textContent = '⚠️ Error de autenticación: verifica tu correo, contraseña y que Email/Password esté activo en Firebase.';
         }
-        setVisualSyncStatus(navigator.onLine ? 'local' : 'offline');
+        setVisualSyncStatus(navigator.onLine ? 'local' : 'offline', '', true);
       }
     }
 
@@ -758,6 +945,10 @@
     }
     if (logoutBtn) {
       logoutBtn.addEventListener('click', async function () {
+        if (fbRuntime.unsubscribeSnapshot) {
+          fbRuntime.unsubscribeSnapshot();
+          fbRuntime.unsubscribeSnapshot = null;
+        }
         if (fbRuntime.auth && fbRuntime.mods) {
           try {
             await fbRuntime.mods.authMod.signOut(fbRuntime.auth);
@@ -769,9 +960,7 @@
     }
 
     window.addEventListener('online', function () {
-      if (window.WilconApp && window.WilconApp.setWilconReaction) {
-        window.WilconApp.setWilconReaction('purring', '🟢 ¡Volvió la conexión a internet!', 2200);
-      }
+      fbRuntime.needsReconnectGreeting = true;
       renderSyncCardUI();
       if (syncPrefs.enabled) {
         performCloudSync('online');
@@ -779,14 +968,7 @@
     });
 
     window.addEventListener('offline', function () {
-      setVisualSyncStatus('offline');
-      if (window.WilconApp && window.WilconApp.setWilconReaction) {
-        window.WilconApp.setWilconReaction(
-          'awake',
-          '📴 Sin conexión: no te preocupes, todo se sigue guardando en tu dispositivo.',
-          3000
-        );
-      }
+      setVisualSyncStatus('offline', '', true);
     });
 
     document.addEventListener('visibilitychange', function () {
@@ -802,6 +984,9 @@
 
   function initPwaAndSync() {
     loadSyncPrefs();
+    if (window.WilconApp && typeof window.WilconApp.getState === 'function') {
+      fbRuntime.lastSyncedFingerprint = computeSyncFingerprint(window.WilconApp.getState(), syncPrefs.syncMood);
+    }
     requestPersistentStorage();
     registerRelativeServiceWorker();
     setupPwaInstallUI();

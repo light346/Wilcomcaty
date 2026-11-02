@@ -1,9 +1,9 @@
 /* ==========================================================================
-   Service Worker · El Rincón Mecatrónico de Wilcon (PWA v2)
+   Service Worker · El Rincón Mecatrónico de Wilcon (PWA v3)
    Caché versionada con soporte de subcarpeta (./) y actualización con aviso
    ========================================================================== */
 
-const CACHE_VERSION = 'wilcon-pwa-cache-v2.0.0';
+const CACHE_VERSION = 'wilcon-pwa-cache-v3.0.0';
 const FIREBASE_SDK_CACHE = 'wilcon-firebase-sdk-v10.14.1';
 
 const APP_SHELL_FILES = [
